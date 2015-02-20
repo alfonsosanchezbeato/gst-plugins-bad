@@ -1094,6 +1094,65 @@ gst_h264_parse_make_codec_data (GstH264Parse * h264parse)
   return buf;
 }
 
+/* create codec data for byte-stream based on collected pps and sps so far */
+static GstBuffer *
+gst_h264_parse_make_codec_data_stream (GstH264Parse * h264parse)
+{
+  GstBuffer *buf, *nal;
+  gint i, sps_size = 0, pps_size = 0, num_sps = 0, num_pps = 0;
+  GstMapInfo map;
+  guint8 *data;
+
+  for (i = 0; i < GST_H264_MAX_SPS_COUNT; i++) {
+    if ((nal = h264parse->sps_nals[i])) {
+      num_sps++;
+      sps_size += gst_buffer_get_size (nal);
+    }
+  }
+  for (i = 0; i < GST_H264_MAX_PPS_COUNT; i++) {
+    if ((nal = h264parse->pps_nals[i])) {
+      num_pps++;
+      pps_size += gst_buffer_get_size (nal);
+    }
+  }
+
+  GST_DEBUG_OBJECT (h264parse,
+      "constructing codec_data: num_sps=%d, num_pps=%d", num_sps, num_pps);
+
+  if (0 == num_pps && 0 == num_sps)
+    return NULL;
+
+  buf = gst_buffer_new_allocate (NULL,
+            4 * num_sps + sps_size + 4 * num_pps + pps_size, NULL);
+
+  gst_buffer_map (buf, &map, GST_MAP_WRITE);
+  data = map.data;
+
+  for (i = 0; i < GST_H264_MAX_SPS_COUNT; i++) {
+    if ((nal = h264parse->sps_nals[i])) {
+      gsize nal_size = gst_buffer_get_size (nal);
+      data[0] = data[1] = data[2] = 0;
+      data[3] = 1;
+      gst_buffer_extract (nal, 0, data + 4, nal_size);
+      data += 4 + nal_size;
+    }
+  }
+
+  for (i = 0; i < GST_H264_MAX_PPS_COUNT; i++) {
+    if ((nal = h264parse->pps_nals[i])) {
+      gsize nal_size = gst_buffer_get_size (nal);
+      data[0] = data[1] = data[2] = 0;
+      data[3] = 1;
+      gst_buffer_extract (nal, 0, data + 4, nal_size);
+      data += 4 + nal_size;
+    }
+  }
+
+  gst_buffer_unmap (buf, &map);
+
+  return buf;
+}
+
 static void
 gst_h264_parse_get_par (GstH264Parse * h264parse, gint * num, gint * den)
 {
@@ -1217,11 +1276,17 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
   sps = h264parse->nalparser->last_sps;
   GST_DEBUG_OBJECT (h264parse, "sps: %p", sps);
 
-  /* only codec-data for nice-and-clean au aligned packetized avc format */
-  if ((h264parse->format == GST_H264_PARSE_FORMAT_AVC
-          || h264parse->format == GST_H264_PARSE_FORMAT_AVC3)
-      && h264parse->align == GST_H264_PARSE_ALIGN_AU) {
-    buf = gst_h264_parse_make_codec_data (h264parse);
+  /* only codec-data for au aligned format */
+  if (h264parse->align == GST_H264_PARSE_ALIGN_AU) {
+    /* Codec data has different format for byte-stream and avc. The case for
+     * having codec data for byte-stream format happens when input is avc but
+     * output can be only byte-stream.
+     */
+    if (h264parse->format == GST_H264_PARSE_FORMAT_BYTE)
+      buf = gst_h264_parse_make_codec_data_stream (h264parse);
+    else
+      buf = gst_h264_parse_make_codec_data (h264parse);
+
     if (buf && h264parse->codec_data) {
       GstMapInfo map;
 
